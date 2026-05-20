@@ -1,0 +1,60 @@
+name: Deploy Federation Config
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'members.enc.yaml'
+      - 'scripts/**'
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host:
+          - federation.yunzheng.space
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SOPS + AGE
+        run: |
+          curl -sLO https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64
+          sudo mv sops-v3.9.4.linux.amd64 /usr/local/bin/sops
+          sudo chmod +x /usr/local/bin/sops
+          sudo apt-get install -y -qq age
+
+      - name: Decrypt members
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: sops decrypt members.enc.yaml > members.dec.yaml
+
+      - name: Generate configs
+        run: |
+          pip install -q pyyaml
+          python3 scripts/generate-configs.py members.dec.yaml out
+
+      - name: Deploy to federation
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ matrix.host }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "out/*"
+          target: "/tmp/federation-deploy"
+          strip_components: 1
+
+      - name: Apply configs and reload
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ matrix.host }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            sudo cp /tmp/federation-deploy/clients.conf /etc/freeradius/3.0/clients.conf
+            sudo cp /tmp/federation-deploy/proxy.conf /etc/freeradius/3.0/proxy.conf
+            sudo systemctl reload freeradius
+            rm -rf /tmp/federation-deploy
+            echo "Deployed to $HOSTNAME at $(date)"
